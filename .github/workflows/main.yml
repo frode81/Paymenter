@@ -1,0 +1,73 @@
+name: Sync fork with upstream
+
+on:
+  schedule:
+    - cron: "17 3 * * *"   # Kjører daglig kl. 03:17 UTC
+  workflow_dispatch:       # Kan kjøres manuelt fra Actions-fanen
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    env:
+      # Disse feltene er tilgjengelige for forks.
+      UPSTREAM_URL: ${{ github.event.repository.parent.clone_url }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+
+    steps:
+      - name: Sjekk ut forkens default-branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEFAULT_BRANCH }}
+          fetch-depth: 0
+
+      - name: Konfigurer Git
+        run: |
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+
+      - name: Legg til upstream og hent
+        run: |
+          git remote add upstream "${{ env.UPSTREAM_URL }}" || true
+          git fetch upstream --tags
+
+      - name: Forsøk fast-forward fra upstream
+        id: ff
+        run: |
+          set -e
+          git checkout "${{ env.DEFAULT_BRANCH }}"
+          # Test om fast-forward er mulig
+          if git merge-base --is-ancestor "upstream/${{ env.DEFAULT_BRANCH }}" "${{ env.DEFAULT_BRANCH }}"; then
+            echo "already_up_to_date=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          # Prøv fast-forward merge (feiler hvis konflikter)
+          if git merge --ff-only "upstream/${{ env.DEFAULT_BRANCH }}"; then
+            echo "fast_forward=true" >> $GITHUB_OUTPUT
+          else
+            echo "fast_forward=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Push direkte til origin (ved fast-forward)
+        if: steps.ff.outputs.fast_forward == 'true'
+        run: |
+          git push origin "${{ env.DEFAULT_BRANCH }}" --follow-tags
+
+      - name: Opprett PR hvis fast-forward ikke var mulig
+        if: steps.ff.outputs.fast_forward == 'false' || steps.ff.outputs.already_up_to_date != 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: sync-upstream/${{ env.DEFAULT_BRANCH }}
+          title: "Sync: Oppdater fra upstream `${{ env.DEFAULT_BRANCH }}`"
+          body: |
+            Denne PR-en synkroniserer forken med upstream. 
+            Den ble opprettet automatisk fordi fast-forward ikke var mulig (endringer i begge ender).
+          commit-message: "sync: merge upstream/${{ env.DEFAULT_BRANCH }} into fork"
+          delete-branch: true
+          labels: |
+            sync
+            automated
